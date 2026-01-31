@@ -1,236 +1,139 @@
 const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
-const fs = require('fs');
+const { createClient } = require('@supabase/supabase-js');
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(bodyParser.json());
 
-const DB_FILE = './database.json';
+// 🔑 SUPABASE INIT
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_KEY
+);
 
-let db = {
-    admins: ["1279324001180844085"], 
-    supports: ["1279324001180844085"],
-    applications: [],
-    keys: []
-};
+app.post('/auth', async (req, res) => {
+  const body = req.body;
+  const action = body.action;
+  const userId = body.user_id || body.userId || 'Guest';
 
-const loadDB = () => {
-    if (fs.existsSync(DB_FILE)) {
-        try {
-            const data = fs.readFileSync(DB_FILE, 'utf8');
-            const parsed = JSON.parse(data);
-            db.admins = parsed.admins || ["1279324001180844085"];
-            db.supports = parsed.supports || [];
-            db.applications = parsed.applications || [];
-            db.keys = parsed.keys || [];
-        } catch (e) {
-            console.log("⚠️ Lỗi đọc file database.");
-        }
-    }
-};
-
-const saveDB = () => {
-    try {
-        fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 4));
-    } catch (e) {
-        console.error("❌ Không thể lưu database:", e);
-    }
-};
-
-loadDB();
-
-app.post('/auth', (req, res) => {
-    const body = req.body;
-    const action = body.action;
-    const userId = body.user_id || body.userId || "Guest";
-
-    console.log(`[${new Date().toLocaleTimeString()}] Action: ${action} | User: ${userId}`);
-
+  try {
     switch (action) {
-        case 'test':
-            return res.json({ success: true });
+      case 'test':
+        return res.json({ success: true });
 
-        // --- THÊM: GET ANALYTICS (Cho các ô thống kê Dashboard) ---
-        case 'get_analytics':
-            const now = new Date();
-            return res.json({
-                success: true,
-                total_keys: db.keys.length,
-                active_keys: db.keys.filter(k => k.hwid && !k.banned && new Date(k.expires_at) > now).length,
-                banned_keys: db.keys.filter(k => k.banned).length,
-                expired_keys: db.keys.filter(k => new Date(k.expires_at) < now).length,
-                total_apps: db.applications.length
-            });
+      // ===== APPS =====
+      case 'get_apps': {
+        const { data, error } = await supabase
+          .from('applications')
+          .select('*');
+        if (error) throw error;
+        return res.json({ success: true, applications: data });
+      }
 
-        // --- THÊM: GET USERS (Cho tab Danh sách User) ---
-        case 'get_users':
-            const userList = db.keys
-                .filter(k => k.hwid) // Chỉ lấy những key đã có máy sử dụng
-                .map(k => ({
-                    user_id: k.hwid,
-                    key_used: k.key,
-                    system_info: k.system_info || "Android Device",
-                    last_login: k.created_at,
-                    status: k.banned ? "Banned" : (new Date(k.expires_at) < new Date() ? "Expired" : "Active")
-                }));
-            return res.json({ success: true, users: userList });
+      case 'create_app': {
+        const { error } = await supabase.from('applications').insert({
+          name: body.app_name,
+          api_key: 'AK-' + Math.random().toString(36).substring(2, 12).toUpperCase(),
+          created_by: userId,
+          created_at: new Date().toISOString()
+        });
+        if (error) throw error;
+        return res.json({ success: true });
+      }
 
-        case 'check_support':
-            const isSupport = db.supports.includes(userId) || db.admins.includes(userId);
-            return res.json({ success: true, is_support: isSupport });
+      case 'delete_app': {
+        await supabase.from('applications').delete().eq('name', body.app_name);
+        await supabase.from('keys').delete().eq('api', body.api);
+        return res.json({ success: true });
+      }
 
-        case 'check_permission':
-            const isAdmin = db.admins.includes(userId);
-            return res.json({ success: true, is_admin: isAdmin, app_count: db.applications.length });
+      // ===== KEYS =====
+      case 'get_keys': {
+        const query = supabase.from('keys').select('*');
+        const { data, error } = body.api
+          ? await query.eq('api', body.api)
+          : await query;
+        if (error) throw error;
+        return res.json({ success: true, keys: data });
+      }
 
-        case 'get_apps':
-            return res.json({ success: true, applications: db.applications });
+      case 'create_key': {
+        const newKey = {
+          key: (body.prefix || 'VIP') + '-' + Math.random().toString(36).substring(2, 10).toUpperCase(),
+          api: body.api,
+          prefix: body.prefix || 'VIP',
+          created_at: new Date().toISOString(),
+          expires_at: new Date(Date.now() + body.days * 86400000).toISOString(),
+          device_limit: body.device_limit || 1,
+          hwids: [],
+          banned: false
+        };
+        const { error } = await supabase.from('keys').insert(newKey);
+        if (error) throw error;
+        return res.json({ success: true, key: newKey.key });
+      }
 
-        case 'create_app':
-            const newApp = {
-                name: body.app_name,
-                api_key: "AK-" + Math.random().toString(36).substring(2, 12).toUpperCase(),
-                created_by: userId,
-                created_at: new Date().toISOString()
-            };
-            db.applications.push(newApp);
-            saveDB();
-            return res.json({ success: true });
+      case 'delete_key':
+        await supabase.from('keys').delete().eq('key', body.key);
+        return res.json({ success: true });
 
-        case 'delete_app':
-            db.applications = db.applications.filter(a => a.name !== body.app_name);
-            db.keys = db.keys.filter(k => k.api !== body.api);
-            saveDB();
-            return res.json({ success: true });
+      case 'ban_key':
+        await supabase.from('keys').update({ banned: true }).eq('key', body.key);
+        return res.json({ success: true });
 
-        case 'get_keys':
-            const filteredKeys = body.api ? db.keys.filter(k => k.api === body.api) : db.keys;
-            const processedKeys = filteredKeys.map(k => {
-                let currentStatus = "Inactive";
-                if (k.banned) currentStatus = "Banned";
-                else if (new Date(k.expires_at) < new Date()) currentStatus = "Expired";
-                else if (k.hwid) currentStatus = "Active"; 
+      case 'reset_hwid':
+        await supabase
+          .from('keys')
+          .update({ hwids: [], system_info: 'Reset by Admin' })
+          .eq('key', body.key);
+        return res.json({ success: true });
 
-                return { ...k, status: currentStatus };
-            });
-            return res.json({ success: true, keys: processedKeys });
+      // ===== VALIDATE =====
+      case 'validate_key': {
+        const { data, error } = await supabase
+          .from('keys')
+          .select('*')
+          .eq('key', body.key)
+          .single();
+        if (error || !data) return res.json({ success: false, message: 'Key not found' });
+        if (data.banned) return res.json({ success: false, message: 'Key banned' });
+        if (new Date(data.expires_at) < new Date())
+          return res.json({ success: false, message: 'Key expired' });
 
-        case 'check_key':
-            const keyDetails = db.keys.find(k => k.key === body.key);
-            if (!keyDetails) return res.json({ success: false, message: "Key not found!" });
-            const viewStatus = keyDetails.banned ? "Banned" : (keyDetails.hwid ? "Active" : "Inactive");
-            return res.json({ success: true, key: { ...keyDetails, status: viewStatus } });
+        const hwid = body.hwid;
+        if (!hwid) return res.json({ success: false, message: 'Missing HWID' });
 
-        case 'create_key':
-            const newKey = {
-                key: (body.prefix || "VIP") + "-" + Math.random().toString(36).substring(2, 10).toUpperCase(),
-                api: body.api,
-                prefix: body.prefix || "VIP",  // ⬅️ THÊM
-                created_at: new Date().toISOString(),
-                expires_at: new Date(Date.now() + (body.days * 86400000)).toISOString(),
-                device_limit: parseInt(body.device_limit) || 1,
-                hwids: [],
-                hwid: null,
-                system_info: "No Device Connected",
-                used: false,
-                banned: false
-            };
-            db.keys.push(newKey);
-            saveDB();
-            return res.json({ success: true, key: newKey.key });
-
-        case 'delete_key':
-            db.keys = db.keys.filter(k => k.key !== body.key);
-            saveDB();
-            return res.json({ success: true });
-
-        case 'reset_hwid':
-            const kToReset = db.keys.find(k => k.key === body.key);
-            if (kToReset) {
-                kToReset.hwids = [];
-                kToReset.hwid = null;
-                kToReset.used = false;
-                kToReset.system_info = "Reset by Admin";
-                saveDB();
-            }
-            return res.json({ success: true });
-
-        case 'ban_key':
-            const kToBan = db.keys.find(k => k.key === body.key);
-            if (kToBan) {
-                kToBan.banned = true;
-                saveDB();
-            }
-            return res.json({ success: true });
-
-      case 'validate_key':
-    const vKey = db.keys.find(k => k.key === body.key);
-    const hwid = body.hwid;
-
-    if (!vKey) return res.json({ success: false, message: "License key not found!" });
-    if (vKey.banned) return res.json({ success: false, message: "This key has been banned!" });
-    if (new Date(vKey.expires_at) < new Date()) return res.json({ success: false, message: "License has expired!" });
-    if (!hwid) return res.json({ success: false, message: "Missing hardware ID (HWID)!" });
-
-    if (!vKey.hwids) vKey.hwids = [];
-
-    // Kiểm tra xem máy này đã đăng ký chưa
-    const isAlreadyRegistered = vKey.hwids.includes(hwid);
-
-    if (isAlreadyRegistered) {
-        // Nếu đã đăng ký rồi thì cho qua luôn
-        vKey.hwid = hwid; // Cập nhật HWID hiện tại
-        saveDB();
-        return res.json({ success: true, message: "Login successful!", expires_at: vKey.expires_at });
-    } else {
-        // Nếu chưa đăng ký, kiểm tra xem còn slot không
-        const limit = vKey.device_limit || 1;
-        if (vKey.hwids.length < limit) {
-            // Còn slot thì thêm vào
-            vKey.hwids.push(hwid);
-            vKey.hwid = hwid;
-            vKey.used = true;
-            vKey.system_info = body.system_info || "Android Device";
-            saveDB();
-            return res.json({ success: true, message: "Device registered and login successful!", expires_at: vKey.expires_at });
-        } else {
-            // Hết slot
-            return res.json({ success: false, message: "Device limit reached! Max: " + limit });
+        const hwids = data.hwids || [];
+        if (!hwids.includes(hwid)) {
+          if (hwids.length >= data.device_limit)
+            return res.json({ success: false, message: 'Device limit reached' });
+          hwids.push(hwid);
         }
+
+        await supabase
+          .from('keys')
+          .update({ hwids, system_info: body.system_info || 'Android' })
+          .eq('key', body.key);
+
+        return res.json({ success: true, expires_at: data.expires_at });
+      }
+
+      default:
+        return res.json({ success: false, message: 'Invalid action' });
     }
-
-
-        case 'get_supports':
-            return res.json({ 
-                success: true, 
-                supports: db.supports.map(id => ({ user_id: id, added_by: 'Admin', added_at: new Date() })) 
-            });
-
-        // --- THÊM: ADD/DELETE SUPPORT (Cho tab Quản lý Support) ---
-        case 'add_support':
-            if (!db.supports.includes(body.user_id)) {
-                db.supports.push(body.user_id);
-                saveDB();
-            }
-            return res.json({ success: true });
-
-        case 'delete_support':
-            db.supports = db.supports.filter(id => id !== body.user_id);
-            saveDB();
-            return res.json({ success: true });
-
-        default:
-            return res.json({ success: false, message: "Invalid action!" });
-    }
+  } catch (err) {
+    return res.json({ success: false, message: err.message });
+  }
 });
 
 app.get('/', (req, res) => {
-    res.send('🚀 API IS RUNNING OK | PHAT DEV COPPYRIGHT');
+  res.send('🚀 API SUPABASE RUNNING OK');
 });
 
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 SERVER FULL TÍNH NĂNG - PORT ${PORT}`);
+  console.log('🚀 SERVER RUNNING ON PORT ' + PORT);
 });
