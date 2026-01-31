@@ -166,29 +166,42 @@ app.post('/auth', (req, res) => {
             }
             return res.json({ success: true });
 
-        case 'validate_key':
-            const vKey = db.keys.find(k => k.key === body.key);
-            const hwid = body.hwid;
-            if (!vKey) return res.json({ success: false, message: "License key not found!" });
-            if (vKey.banned) return res.json({ success: false, message: "This key has been banned!" });
-            if (new Date(vKey.expires_at) < new Date()) return res.json({ success: false, message: "License has expired!" });
-            if (!hwid) return res.json({ success: false, message: "Missing hardware ID (HWID)!" });
+      case 'validate_key':
+    const vKey = db.keys.find(k => k.key === body.key);
+    const hwid = body.hwid;
 
-            if (!vKey.hwids) vKey.hwids = [];
-            if (!vKey.hwid || vKey.hwid === hwid || vKey.hwids.includes(hwid)) {
-                if (!vKey.hwids.includes(hwid)) {
-                    const limit = vKey.device_limit || 1;
-                    if (vKey.hwids.length >= limit) return res.json({ success: false, message: "Limit reached!" });
-                    vKey.hwids.push(hwid);
-                }
-                vKey.hwid = hwid;
-                vKey.used = true;
-                vKey.system_info = body.system_info || "Android Device";
-                saveDB();
-                return res.json({ success: true, message: "Login successful!", expires_at: vKey.expires_at });
-            } else {
-                return res.json({ success: false, message: "Wrong HWID!" });
-            }
+    if (!vKey) return res.json({ success: false, message: "License key not found!" });
+    if (vKey.banned) return res.json({ success: false, message: "This key has been banned!" });
+    if (new Date(vKey.expires_at) < new Date()) return res.json({ success: false, message: "License has expired!" });
+    if (!hwid) return res.json({ success: false, message: "Missing hardware ID (HWID)!" });
+
+    if (!vKey.hwids) vKey.hwids = [];
+
+    // Kiểm tra xem máy này đã đăng ký chưa
+    const isAlreadyRegistered = vKey.hwids.includes(hwid);
+
+    if (isAlreadyRegistered) {
+        // Nếu đã đăng ký rồi thì cho qua luôn
+        vKey.hwid = hwid; // Cập nhật HWID hiện tại
+        saveDB();
+        return res.json({ success: true, message: "Login successful!", expires_at: vKey.expires_at });
+    } else {
+        // Nếu chưa đăng ký, kiểm tra xem còn slot không
+        const limit = vKey.device_limit || 1;
+        if (vKey.hwids.length < limit) {
+            // Còn slot thì thêm vào
+            vKey.hwids.push(hwid);
+            vKey.hwid = hwid;
+            vKey.used = true;
+            vKey.system_info = body.system_info || "Android Device";
+            saveDB();
+            return res.json({ success: true, message: "Device registered and login successful!", expires_at: vKey.expires_at });
+        } else {
+            // Hết slot
+            return res.json({ success: false, message: "Device limit reached! Max: " + limit });
+        }
+    }
+
 
         case 'get_supports':
             return res.json({ 
